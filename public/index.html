@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrackPoint live map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #f6f7f4; --panel: #ffffff; --ink: #16282b; --muted: #5d6d70;
+    --line: #dde3e1; --on: #2a9d6f; --off: #9aa6a8; --accent: #e4572e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #101a1c; --panel: #16282b; --ink: #e8efee; --muted: #93a5a8; --line: #264044; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); display: flex; }
+  aside { width: 320px; max-width: 42vw; background: var(--panel); border-right: 1px solid var(--line);
+          display: flex; flex-direction: column; }
+  header { padding: 16px 18px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  #summary { color: var(--muted); font-size: 13px; }
+  #list { overflow-y: auto; flex: 1; }
+  .dev { padding: 12px 18px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .dev:hover, .dev:focus-visible { background: color-mix(in srgb, var(--accent) 8%, transparent); outline: none; }
+  .dev.sel { box-shadow: inset 3px 0 0 var(--accent); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.on { background: var(--on); }
+  .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.5; }
+  .empty { padding: 24px 18px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+  button.x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 2px 6px; }
+  button.x:hover { color: var(--accent); }
+  #map { flex: 1; }
+  @media (max-width: 640px) {
+    body { flex-direction: column-reverse; }
+    aside { width: 100%; max-width: none; height: 38%; border-right: 0; border-top: 1px solid var(--line); }
+    #map { height: 62%; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>TrackPoint live map</h1>
+    <div id="summary">Connecting…</div>
+  </header>
+  <div id="list"></div>
+</aside>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map("map").setView([-0.6167, 30.6585], 13); // Mbarara
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+const COLORS = ["#e4572e", "#2a9d6f", "#3b6fd4", "#b5179e", "#e9a100", "#0b8f9c"];
+const layers = {};     // id -> {marker, circle, trail}
+let selected = null, fitted = false, viewKey = sessionStorage.getItem("viewKey") || "";
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDist = m => m >= 1000 ? (m / 1000).toFixed(2) + " km" : Math.round(m) + " m";
+function ago(ts) {
+  const s = Math.round((Date.now() - ts) / 1000);
+  return s < 60 ? s + " s ago" : s < 3600 ? Math.round(s / 60) + " min ago" : Math.round(s / 3600) + " h ago";
+}
+function colorFor(id) {
+  let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return COLORS[h % COLORS.length];
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "x-view-key": viewKey } });
+  if (r.status === 401) {
+    const k = prompt("Enter the dashboard password (VIEW_KEY):");
+    if (k === null) throw new Error("locked");
+    viewKey = k; sessionStorage.setItem("viewKey", k);
+    return api(path, opts);
+  }
+  return r.json();
+}
+
+function draw(devs) {
+  const seen = new Set();
+  devs.forEach(d => {
+    seen.add(d.id);
+    const col = colorFor(d.id), pos = [d.lat, d.lng];
+    let L_ = layers[d.id];
+    if (!L_) {
+      L_ = layers[d.id] = {
+        trail: L.polyline([], { weight: 4, opacity: 0.85 }).addTo(map),
+        circle: L.circle(pos, { weight: 1, fillOpacity: 0.12 }).addTo(map),
+        marker: L.circleMarker(pos, { radius: 9, weight: 3, color: "#fff", fillOpacity: 1 }).addTo(map)
+      };
+    }
+    L_.trail.setLatLngs(d.trail).setStyle({ color: col });
+    L_.circle.setLatLng(pos).setRadius(Math.max(d.accuracy, 1)).setStyle({ color: col, fillColor: col });
+    L_.marker.setLatLng(pos).setStyle({ fillColor: d.online ? col : "#9aa6a8" });
+    L_.marker.bindPopup(`<b>${esc(d.name)}</b><br>${d.lat.toFixed(5)}, ${d.lng.toFixed(5)}<br>Accuracy ±${Math.round(d.accuracy)} m`);
+  });
+  Object.keys(layers).forEach(id => {
+    if (!seen.has(id)) { Object.values(layers[id]).forEach(l => map.removeLayer(l)); delete layers[id]; }
+  });
+  if (!fitted && devs.length) {
+    map.fitBounds(L.latLngBounds(devs.map(d => [d.lat, d.lng])).pad(0.3), { maxZoom: 17 });
+    fitted = true;
+  }
+  if (selected && layers[selected]) {
+    const d = devs.find(x => x.id === selected);
+    if (d && d.online) map.panTo([d.lat, d.lng], { animate: true });
+  }
+}
+
+function render(devs) {
+  const online = devs.filter(d => d.online).length;
+  document.getElementById("summary").textContent =
+    devs.length ? `${online} online, ${devs.length - online} offline` : "No devices yet";
+  const list = document.getElementById("list");
+  if (!devs.length) {
+    list.innerHTML = '<div class="empty">No phones have reported in. Open the TrackPoint app, choose GPS or Network, and tap Start tracking.</div>';
+    return;
+  }
+  list.innerHTML = devs.map(d => `
+    <div class="dev ${d.id === selected ? "sel" : ""}" tabindex="0" data-id="${esc(d.id)}">
+      <div class="row">
+        <span class="dot ${d.online ? "on" : ""}"></span>
+        <span class="name">${esc(d.name)}</span>
+        <button class="x" title="Remove device" data-del="${esc(d.id)}">&times;</button>
+      </div>
+      <div class="meta">
+        ${d.online ? "Live" : "Last seen " + ago(d.updated)} &middot; ${esc(d.provider || "unknown")}<br>
+        ${d.speed.toFixed(1)} km/h &middot; ±${Math.round(d.accuracy)} m &middot; ${fmtDist(d.distance)} travelled &middot; ${d.points} points
+      </div>
+    </div>`).join("");
+}
+
+document.getElementById("list").addEventListener("click", async e => {
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    e.stopPropagation();
+    if (confirm("Remove this device and its trail?")) { await api("/api/devices/" + encodeURIComponent(del.dataset.del), { method: "DELETE" }); refresh(); }
+    return;
+  }
+  const row = e.target.closest(".dev");
+  if (!row) return;
+  selected = row.dataset.id;
+  const l = layers[selected];
+  if (l) { map.setView(l.marker.getLatLng(), Math.max(map.getZoom(), 17)); l.marker.openPopup(); }
+  refresh();
+});
+
+async function refresh() {
+  try {
+    const devs = await api("/api/devices");
+    draw(devs); render(devs);
+  } catch (err) {
+    document.getElementById("summary").textContent = err.message === "locked" ? "Locked" : "Server unreachable, retrying…";
+  }
+}
+refresh();
+setInterval(refresh, 2500);
+</script>
+</body>
+</html>

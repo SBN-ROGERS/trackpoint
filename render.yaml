@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: trackpoint
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: API_KEY      # secret the Android app sends with every update
+        generateValue: true
+      - key: VIEW_KEY     # password to open the map dashboard
+        generateValue: true
